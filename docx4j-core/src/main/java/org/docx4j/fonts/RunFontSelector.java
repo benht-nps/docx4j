@@ -2,6 +2,8 @@ package org.docx4j.fonts;
 
 import org.docx4j.Docx4jProperties;
 import org.docx4j.XmlUtils;
+import org.docx4j.convert.out.common.writer.SymbolMapper;
+import org.docx4j.convert.out.common.writer.SymbolUtils;
 import org.docx4j.model.PropertyResolver;
 import org.docx4j.model.properties.Property;
 import org.docx4j.openpackaging.exceptions.Docx4JException;
@@ -24,6 +26,7 @@ import org.w3c.dom.Element;
 //import com.vdurmont.emoji.EmojiManager;
 
 import java.awt.font.NumericShaper;
+import java.nio.charset.StandardCharsets;
 import java.util.concurrent.ExecutionException;
 
 /**
@@ -292,6 +295,29 @@ public class RunFontSelector {
     		
     	} 
     }
+
+    public void symbolSetAttribute(Element el) {
+    	
+    	// could a document fragment contain just a #text node?
+    	
+		if (outputType== RunFontActionType.DISCOVERY) {
+			return;
+		} else if (outputType==RunFontActionType.XHTML) {
+    		if (spacePreserve) {
+    	    	/*
+    	    	 * 	Convert @xml:space='preserve' to style="white-space:pre-wrap;"
+    				which is good for FF3, and WebKit; not honoured by IE7 though. 
+    	    	 */
+    			el.setAttribute("style", Property.composeCss(CSS_NAME, SymbolUtils.HTML_FONT_FAMILY) + "white-space:pre-wrap;");
+    			
+    		} else {
+    			el.setAttribute("style", Property.composeCss(CSS_NAME, SymbolUtils.HTML_FONT_FAMILY) );
+    		}
+    	} else if (outputType==RunFontActionType.XSL_FO) {
+    			//el.setAttribute("font-family", "TODO" );
+    				// whichever is available of Noto Sans Symbols 2; Segoe UI Symbol etc
+    	} 
+    }
     
     private boolean spacePreserve;
     
@@ -403,7 +429,66 @@ public class RunFontSelector {
 		if (rFonts==null) // compare empty, which RunFontSelectorChinese2Test is sensitive to; with empty on a quick skim it looks like unicodeRangeToFont is used. 
 		{
 			return nullRPr(document, text);
-		}		
+		}	
+		
+		// @since 11.5.5
+		if (rFonts.getHAnsi()!=null) {  
+			String actualFontName = rFonts.getHAnsi();
+			if (actualFontName.equals("Symbol") || actualFontName.equals("Webdings") || actualFontName.equals("Wingdings") || actualFontName.equals("Wingdings 2") || actualFontName.equals("Wingdings 3") ) {
+				// For these fonts, we depart from the general approach outline in the class comment above,
+				// and map the char to a known Unicode replacement.
+    			Element	span = createElement(document);
+    			if (span!=null) {
+    				// It will be null in MainDocumentPart$FontAndStyleFinder case
+	    			document.appendChild(span); 
+	    			this.symbolSetAttribute(span); 
+	    			
+	    			StringBuffer sb = new StringBuffer();
+	    			
+	    			text.codePoints().forEach(cp -> 
+		    			{
+		    				String valStr = null;
+		    				
+		    				// VBA like rng.InsertAfter Chr(i); rng.Font.Name = "Wingdings"
+		    				// for code points 128-159 (0x80-0x9F) results in Unicode you might not expect (rather than the code point asked for).
+		    				// This is because these are used in the Windows-1252 codepage but are reserved in Unicode for 
+		    				// control characters: https://en.wikipedia.org/wiki/Windows-1252
+		    				// For example, codepoint 137 (0x89) gets translated to U+2030.	
+		    				// See further https://github.com/plutext/docx4j/issues/632
+		    				if (cp>255) {
+		    					cp = translateUnicode2SingleByte(cp);
+		    				}
+		    				
+		    				if (cp>255 /* couldn't translate! */ ) {
+		    					log.info("Encountered unexpected char: " + actualFontName + " " + (short)cp + " Hex " + Integer.toHexString(cp) );
+//								String codePointString = new String(Character.toChars(cp));
+//								byte[] valBytes = codePointString.getBytes(StandardCharsets.UTF_8);
+								// what to do?  try anyway...
+		    					valStr = SymbolMapper.getUnicodeReplacementChar(actualFontName, (short)cp);
+		    				} /* usual case */ else {
+		    					valStr = SymbolMapper.getUnicodeReplacementChar(actualFontName, (short)cp);
+		    				}
+							if (valStr==null) {
+								sb.append(SymbolUtils.MISSING_SYMBOL); 
+								log.warn(actualFontName + " " + (short)cp + " Hex " + Integer.toHexString(cp) + " has no replacement.");
+								
+							} else {
+								sb.append(valStr);  						
+							}
+		    			}
+	    			);
+	    			
+	    			span.setTextContent(sb.toString());  
+    			}
+    			if (outputType== RunFontActionType.DISCOVERY) {
+    				// TODO?
+    				// vis.fontAction(fontName);
+    			}
+    			
+    			return result(document);
+				
+			}
+		}
     	
 		if (pPr!=null && pPr.getBidi()!=null && pPr.getBidi().isVal() ) {
 			text = this.arabicNumbering(text, rPr.getRtl(), rPr.getCs(), themeFontLang);
@@ -591,7 +676,42 @@ public class RunFontSelector {
 	    		 eastAsia,  ascii,  hAnsi );
     }
     
-    private boolean contains(String langEastAsia, String lang) {
+    private int translateUnicode2SingleByte(int cp) {
+
+		switch (cp) {
+		case 0x20AC: return 0x80;
+		case 0x201A: return 0x82;
+		case 0x0192: return 0x83;
+		case 0x201E: return 0x84;
+		case 0x2026: return 0x85;
+		case 0x2020: return 0x86;
+		case 0x2021: return 0x87;
+		case 0x02C6: return 0x88;
+		case 0x2030: return 0x89;
+		case 0x0160: return 0x8A;
+		case 0x2039: return 0x8B;
+		case 0x0152: return 0x8C;
+		case 0x017D: return 0x8E;
+		case 0x2018: return 0x91;
+		case 0x2019: return 0x92;
+		case 0x201C: return 0x93;
+		case 0x201D: return 0x94;
+		case 0x2022: return 0x95;
+		case 0x2013: return 0x96;
+		case 0x2014: return 0x97;
+		case 0x02DC: return 0x98;
+		case 0x2122: return 0x99;
+		case 0x0161: return 0x9A;
+		case 0x203A: return 0x9B;
+		case 0x0153: return 0x9C;
+		case 0x017E: return 0x9E;
+		case 0x0178: return 0x9F;		
+		default: return cp;
+		}
+	}
+
+
+	private boolean contains(String langEastAsia, String lang) {
     	
     	// eg <w:lang w:eastAsia="zh-CN" .. />
     	if (langEastAsia==null) return false;
@@ -1101,7 +1221,7 @@ public class RunFontSelector {
 				if (!GlyphCheck.hasChar(fontName, c)) {
 //					Throwable t = new Throwable();
 //					log.debug("FIXME", t);
-					log.debug(fontName + " missing " + c);
+					log.debug(fontName + "'s PhysicalFont is missing char " + c);
 				}
 			} catch (ExecutionException e) {
 				log.error(e.getMessage(), e);
